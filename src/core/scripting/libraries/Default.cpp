@@ -19,7 +19,7 @@ namespace YimMenu::Lua
 
 		void SetLuaRequirePath(lua_State* state)
 		{
-			const fs::path scriptsFolder = FileMgr::GetProjectFile(std::string("./scripts"));
+			const fs::path scriptsFolder = FileMgr::GetProjectFolder(std::string("./scripts"));
 			std::string pathString = (scriptsFolder / "?.lua").string() + ";";
 
 			for (const auto& entry : fs::recursive_directory_iterator(scriptsFolder, fs::directory_options::skip_permission_denied))
@@ -34,17 +34,20 @@ namespace YimMenu::Lua
 				pathString.pop_back();
 
 			lua_getglobal(state, "package");
+
 			if (lua_istable(state, -1))
 			{
 				lua_pushstring(state, pathString.c_str());
 				lua_setfield(state, -2, "path");
 			}
+
 			lua_pop(state, 1);
 		}
 
 		static void SandboxLuaOSLib(lua_State* state)
 		{
 			lua_getglobal(state, "os");
+
 			if (!lua_istable(state, -1))
 			{
 				lua_pop(state, 1);
@@ -52,7 +55,6 @@ namespace YimMenu::Lua
 			}
 
 			lua_newtable(state);
-
 			const char* allowed[] = {
 				"clock",
 				"date",
@@ -63,16 +65,17 @@ namespace YimMenu::Lua
 			for (const char* name : allowed)
 			{
 				lua_getfield(state, -2, name);
-				lua_setfield(state, -2, name);
+				lua_setfield(state, -3, name);
 			}
 
+			lua_remove(state, -2);
 			lua_setglobal(state, "os");
 		}
 		
 		static int LuaIO_Exists(lua_State* state)
 		{
 			const char* filename = luaL_checkstring(state, 1);
-			const fs::path configPath = FileMgr::GetProjectFile(std::string("./scripts/config/"));
+			const fs::path configPath = FileMgr::GetProjectFolder(std::string("./scripts/config"));
 			fs::path fullPath = configPath / filename;
 
 			if (!IsPathInside(configPath, fullPath))
@@ -87,7 +90,8 @@ namespace YimMenu::Lua
 
 		static int SandboxLuaIO_Open(lua_State* state)
 		{
-			lua_getglobal(state, "__original_io_open");
+			lua_getfield(state, LUA_REGISTRYINDEX, "sandbox.io.open");
+
 			if (!lua_isfunction(state, -1))
 			{
 				lua_pop(state, 1);
@@ -98,9 +102,8 @@ namespace YimMenu::Lua
 
 			const char* filename = luaL_checkstring(state, 1);
 			const char* mode = luaL_optstring(state, 2, "r");
-
-			const fs::path configPath = FileMgr::GetProjectFile(std::string("./scripts/config/"));
-			fs::path fullPath = configPath / filename;
+			const fs::path configPath = FileMgr::GetProjectFolder(std::string("./scripts/config"));
+			const fs::path fullPath = configPath / filename;
 
 			if (!IsPathInside(configPath, fullPath))
 			{
@@ -117,6 +120,7 @@ namespace YimMenu::Lua
 			return 1; // file handle or nil
 		}
 
+		// luaL_requiref
 		static void requiref(lua_State* state, const char* name, lua_CFunction openf, int global)
 		{
 			lua_getfield(state, LUA_REGISTRYINDEX, "_LOADED");
@@ -142,28 +146,44 @@ namespace YimMenu::Lua
 			lua_pop(state, 1);
 		}
 
-
-		void SandboxLuaIOLib(lua_State* state)
+		void GetOrigLuaIO(lua_State* state)
 		{
-			// all this bs just to get io.open. I hate LuaJIT
+			// all this bs just to get io.open
 			requiref(state, LUA_IOLIBNAME, luaopen_io, 1);
 			lua_getfield(state, -1, "open");
-
-			// should probably use registry for these instead of globals
-			lua_setglobal(state, "__original_io_open");
+			lua_setfield(state, LUA_REGISTRYINDEX, "sandbox.io.open");
 			lua_getfield(state, -1, "flush");
-			lua_setglobal(state, "__original_io_flush");
+			lua_setfield(state, LUA_REGISTRYINDEX, "sandbox.io.flush");
 			lua_getfield(state, -1, "close");
-			lua_setglobal(state, "__original_io_close");
+			lua_setfield(state, LUA_REGISTRYINDEX, "sandbox.io.close");
 			lua_pushnil(state);
 			lua_setglobal(state, "io");
-
 			lua_getfield(state, LUA_REGISTRYINDEX, "_LOADED");
 			lua_pushnil(state);
 			lua_setfield(state, -2, "io");
 			lua_pop(state, 1);
 		}
 
+		void SandboxLuaIOLib(lua_State* state)
+		{
+			GetOrigLuaIO(state);
+			lua_newtable(state);
+			lua_pushcfunction(state, SandboxLuaIO_Open);
+			lua_setfield(state, -2, "open");
+			lua_getfield(state, LUA_REGISTRYINDEX, "sandbox.io.flush");
+			lua_setfield(state, -2, "flush");
+			lua_getfield(state, LUA_REGISTRYINDEX, "sandbox.io.close");
+			lua_setfield(state, -2, "close");
+			lua_pushcfunction(state, LuaIO_Exists);
+			lua_setfield(state, -2, "exists");
+			lua_setglobal(state, "io");
+			lua_pushnil(state);
+			lua_setfield(state, LUA_REGISTRYINDEX, "sandbox.io.open");
+			lua_pushnil(state);
+			lua_setfield(state, LUA_REGISTRYINDEX, "sandbox.io.flush");
+			lua_pushnil(state);
+			lua_setfield(state, LUA_REGISTRYINDEX, "sandbox.io.close");
+		}
 
 		virtual void Register(lua_State* state) override
 		{
@@ -176,9 +196,9 @@ namespace YimMenu::Lua
 	      //    {LUA_OSLIBNAME, luaopen_os},
 			    {LUA_STRLIBNAME, luaopen_string},
 			    {LUA_MATHLIBNAME, luaopen_math},
-			    {LUA_DBLIBNAME, luaopen_debug}, // shouldn't we disable debug?
+			    {LUA_DBLIBNAME, luaopen_debug}, // we have to disable or wrap debuglib
 			    {LUA_BITLIBNAME, luaopen_bit},
-			    {LUA_JITLIBNAME, luaopen_jit},
+			    {LUA_JITLIBNAME, luaopen_jit}, // same here? idk
 			    {NULL, NULL}
 			};
 
@@ -187,24 +207,6 @@ namespace YimMenu::Lua
 			    {NULL, NULL}
 			};
 
-			SandboxLuaIOLib(state);
-			lua_newtable(state);
-			lua_pushcfunction(state, SandboxLuaIO_Open);
-			lua_setfield(state, -2, "open");
-			lua_getglobal(state, "__original_io_flush");
-			lua_setfield(state, -2, "flush");
-			lua_getglobal(state, "__original_io_close");
-			lua_setfield(state, -2, "close");
-			lua_pushcfunction(state, LuaIO_Exists);
-			lua_setfield(state, -2, "exists");
-			lua_setglobal(state, "io");
-			lua_pushnil(state);
-			lua_setglobal(state, "__original_io_open");
-			lua_pushnil(state);
-			lua_setglobal(state, "__original_io_flush");
-			lua_pushnil(state);
-			lua_setglobal(state, "__original_io_close");
-
 			const luaL_Reg* lib;
 			for (lib = lj_lib_load; lib->func; lib++)
 			{
@@ -212,6 +214,7 @@ namespace YimMenu::Lua
 				lua_pushstring(state, lib->name);
 				lua_call(state, 1, 0);
 			}
+
 			luaL_findtable(state, LUA_REGISTRYINDEX, "_PRELOAD", sizeof(lj_lib_preload) / sizeof(lj_lib_preload[0]) - 1);
 			for (lib = lj_lib_preload; lib->func; lib++)
 			{
@@ -219,6 +222,9 @@ namespace YimMenu::Lua
 				lua_setfield(state, -2, lib->name);
 			}
 			lua_pop(state, 1);
+
+			SandboxLuaOSLib(state);
+			SandboxLuaIOLib(state);
 		}
 	};
 
